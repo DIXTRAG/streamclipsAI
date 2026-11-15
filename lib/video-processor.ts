@@ -16,7 +16,7 @@ export interface VideoProcessingOptions {
   fps?: number
   bitrate?: string
   preset?: 'ultrafast' | 'superfast' | 'veryfast' | 'faster' | 'fast' | 'medium' | 'slow'
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void | Promise<void>
 }
 
 export interface ProcessingResult {
@@ -106,7 +106,7 @@ export class VideoProcessor {
       // Execute FFmpeg with progress tracking
       const progressCallback = (progress: number) => {
         console.log(`Extraction progress: ${progress.toFixed(1)}%`)
-        options.onProgress?.(progress)
+        void Promise.resolve(options.onProgress?.(progress)).catch((error) => console.error('Progress callback failed:', error))
       }
       
       await this.runFFmpegWithProgress(args, duration, progressCallback)
