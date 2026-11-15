@@ -9,8 +9,8 @@ import { ThemeProvider } from "@/components/theme-provider";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "StreamClips AI - AI-Powered Twitch Highlight Generator",
-  description: "Automatically create viral-ready clips from your Twitch VODs using AI chat analysis",
+  title: "StreamClips AI - Stream Highlight and Clip Editor",
+  description: "Review highlight candidates from authorized stream recordings and prepare short-form video clips.",
 };
 
 export default function RootLayout({
