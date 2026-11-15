@@ -12,12 +12,16 @@ function verifyWebhookSignature(
   signature: string,
   secret: string
 ): boolean {
+  // SHA-256 HMAC signatures are 64 hexadecimal characters.
+  // Validate before timingSafeEqual because it throws for unequal buffer lengths.
+  if (!/^[a-f0-9]{64}$/i.test(signature)) return false;
+
   const hmac = crypto.createHmac('sha256', secret);
-  const digest = hmac.update(payload).digest('hex');
-  return crypto.timingSafeEqual(
-    Buffer.from(signature),
-    Buffer.from(digest)
-  );
+  const digest = hmac.update(payload).digest();
+  const supplied = Buffer.from(signature, 'hex');
+
+  return supplied.length === digest.length &&
+    crypto.timingSafeEqual(supplied, digest);
 }
 
 export async function POST(request: NextRequest) {
@@ -48,10 +52,15 @@ export async function POST(request: NextRequest) {
     const eventId = (meta?.event_id as string | undefined) ?? `${data?.id || 'unknown'}:${meta?.event_name || 'unknown'}`;
     const hash = crypto.createHash('sha256').update(`lemonsqueezy:${eventId}`).digest('hex');
     try {
-      await db.$executeRaw`INSERT INTO "WebhookDedup" ("provider","hash") VALUES ('lemonsqueezy', ${hash}) ON CONFLICT ("hash") DO NOTHING`;
+      const inserted = await db.$executeRaw`INSERT INTO "WebhookDedup" ("provider","hash") VALUES ('lemonsqueezy', ${hash}) ON CONFLICT ("hash") DO NOTHING`;
+      if (inserted === 0) {
+        // Event already handled; acknowledge the retry without applying side effects twice.
+        return NextResponse.json({ received: true, duplicate: true });
+      }
     } catch (e) {
-      // If table doesn't exist yet (migration not applied), continue processing without dedup
-      console.error('Webhook dedup insert failed (continuing):', e);
+      // Do not process billing events if durable idempotency cannot be guaranteed.
+      console.error('Webhook dedup insert failed:', e);
+      return NextResponse.json({ error: 'Webhook idempotency unavailable' }, { status: 503 });
     }
 
     // Extract event data
