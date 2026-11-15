@@ -16,7 +16,7 @@ export interface VideoProcessingOptions {
   fps?: number
   bitrate?: string
   preset?: 'ultrafast' | 'superfast' | 'veryfast' | 'faster' | 'fast' | 'medium' | 'slow'
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void | Promise<void>
 }
 
 export interface ProcessingResult {
@@ -54,11 +54,20 @@ export class VideoProcessor {
       preset = 'fast'
     } = options
 
+    if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || startTime < 0 || endTime <= startTime) {
+      return { success: false, error: 'Invalid clip time range: endTime must be greater than startTime and both values must be finite and non-negative' }
+    }
+
     const duration = endTime - startTime
+    if (duration > 600) {
+      return { success: false, error: 'Clip duration exceeds the 10-minute processing limit' }
+    }
+
     const outputPath = path.join(this.tempDir, `clip_${uuidv4()}.${outputFormat}`)
 
     try {
-      // For Twitch VODs, we need to handle authentication
+      await fs.mkdir(this.tempDir, { recursive: true })
+      // For authorized media URLs only, pass required platform headers
       const isM3U8 = inputUrl.includes('.m3u8')
       const headers = isM3U8 && process.env.TWITCH_CLIENT_ID ? 
         ['-headers', `Client-ID: ${process.env.TWITCH_CLIENT_ID}\r\n`] : []
@@ -97,14 +106,14 @@ export class VideoProcessor {
       // Execute FFmpeg with progress tracking
       const progressCallback = (progress: number) => {
         console.log(`Extraction progress: ${progress.toFixed(1)}%`)
-        options.onProgress?.(progress)
+        void Promise.resolve(options.onProgress?.(progress)).catch((error) => console.error('Progress callback failed:', error))
       }
       
       await this.runFFmpegWithProgress(args, duration, progressCallback)
 
       // Verify output file exists
       const stats = await fs.stat(outputPath)
-      if (!stats.isFile()) {
+      if (!stats.isFile() || stats.size === 0) {
         throw new Error('Output file not created')
       }
 
@@ -132,6 +141,10 @@ export class VideoProcessor {
     )
 
     try {
+      await fs.mkdir(this.tempDir, { recursive: true })
+      if (timestamp !== undefined && (!Number.isFinite(timestamp) || timestamp < 0)) {
+        throw new Error('Thumbnail timestamp must be a finite non-negative number')
+      }
       const args = [
         '-i', videoPath,
         '-ss', (timestamp || 0).toString(),
@@ -317,7 +330,7 @@ export class VideoProcessor {
 
   private runFFmpeg(args: string[]): Promise<void> {
     return new Promise((resolve, reject) => {
-      const ffmpeg = spawn('ffmpeg', args)
+      const ffmpeg = spawn('ffmpeg', ['-nostdin', '-hide_banner', ...args], { windowsHide: true })
       let stderr = ''
 
       ffmpeg.stderr.on('data', (data) => {
@@ -389,7 +402,7 @@ export class VideoProcessor {
   private runFFmpegWithProgress(
     args: string[],
     totalDuration: number,
-    onProgress?: (progress: number) => void
+    onProgress?: (progress: number) => void | Promise<void>
   ): Promise<void> {
     return new Promise((resolve, reject) => {
       const ffmpeg = spawn('ffmpeg', args)
@@ -407,7 +420,7 @@ export class VideoProcessor {
             
             if (progress > lastProgress && onProgress) {
               lastProgress = progress
-              onProgress(Math.min(progress, 100))
+              void Promise.resolve(onProgress(Math.min(progress, 100))).catch((error) => console.error('Progress callback failed:', error))
             }
           }
         }
@@ -419,7 +432,7 @@ export class VideoProcessor {
 
       ffmpeg.on('close', (code) => {
         if (code === 0) {
-          if (onProgress) onProgress(100)
+          if (onProgress) void Promise.resolve(onProgress(100)).catch((error) => console.error('Progress callback failed:', error))
           resolve()
         } else {
           reject(new Error(`FFmpeg exited with code ${code}: ${stderr}`))

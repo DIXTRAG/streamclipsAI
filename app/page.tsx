@@ -68,18 +68,18 @@ export default function HomePage() {
           <div className="max-w-5xl mx-auto text-center">
             <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full glass-purple text-sm mb-8 animate-fade-down">
               <Star className="h-4 w-4 text-purple-400" />
-              <span className="text-gray-300">Powered by GPT-4 & Claude</span>
+              <span className="text-gray-300">Highlight tools for streamers</span>
             </div>
             
             <h1 className="text-5xl lg:text-7xl font-bold tracking-tight mb-6 animate-fade-up">
-              <span className="block">Transform your</span>
-              <span className="block text-gradient-purple mt-2">Twitch streams</span>
+              <span className="block">Turn your</span>
+              <span className="block text-gradient-purple mt-2">streams and recordings</span>
               <span className="block">into viral clips</span>
             </h1>
             
             <p className="text-xl text-gray-400 max-w-3xl mx-auto mb-10 animate-fade-up" style={{animationDelay: '0.1s'}}>
-              Let AI analyze your chat and automatically detect the most hype moments. 
-              Create TikToks, Reels, and Shorts in seconds, not hours.
+              Find promising moments with chat-activity signals and review them before exporting. 
+              Prepare vertical clips for TikTok, Reels, and Shorts.
             </p>
             
             <div className="flex flex-col sm:flex-row gap-4 justify-center mb-20 animate-fade-up" style={{animationDelay: '0.2s'}}>
@@ -137,10 +137,10 @@ export default function HomePage() {
           <div className="max-w-4xl mx-auto">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
               {[
-                { value: "50K+", label: "Clips Generated", delay: "0ms" },
-                { value: "10M+", label: "Hours Analyzed", delay: "50ms" },
-                { value: "95%", label: "Accuracy Rate", delay: "100ms" },
-                { value: "< 2min", label: "Processing Time", delay: "150ms" }
+                { value: "In development", label: "Usage metrics", delay: "0ms" },
+                { value: "Multi-source", label: "Input sources", delay: "50ms" },
+                { value: "Review-first", label: "Human review", delay: "100ms" },
+                { value: "FFmpeg", label: "Video engine", delay: "150ms" }
               ].map((stat, i) => (
                 <div key={i} className="glass-subtle rounded-2xl p-6 text-center hover-card animate-fade-up" style={{animationDelay: stat.delay}}>
                   <div className="text-3xl font-bold text-gradient mb-2">{stat.value}</div>
@@ -172,7 +172,7 @@ export default function HomePage() {
                 </div>
                 <h3 className="text-2xl font-bold mb-3">Smart Chat Analysis</h3>
                 <p className="text-gray-400 mb-6">
-                  Our AI models analyze chat velocity, emote usage, and viewer sentiment in real-time 
+                  The current analyzer scores chat activity, emote usage, and message patterns 
                   to identify the exact moments your audience goes wild.
                 </p>
                 <div className="grid grid-cols-3 gap-4">
@@ -193,7 +193,7 @@ export default function HomePage() {
                 </div>
                 <h3 className="text-xl font-bold mb-3">Lightning Fast</h3>
                 <p className="text-gray-400">
-                  Process hours of content in minutes. Our distributed GPU infrastructure ensures 
+                  Generate clips with the processing speed available on your configured infrastructure. 
                   you get your clips while the hype is still fresh.
                 </p>
               </div>
@@ -235,7 +235,7 @@ export default function HomePage() {
                 </div>
                 <h3 className="text-xl font-bold mb-3">Privacy First</h3>
                 <p className="text-gray-400">
-                  Your content stays yours. Enterprise-grade security with SOC 2 compliance 
+                  Process only content you own or are authorized to use. 
                   and encrypted storage.
                 </p>
               </div>
@@ -256,13 +256,13 @@ export default function HomePage() {
               {[
                 {
                   step: "01",
-                  title: "Connect your Twitch",
-                  description: "Link your account and select any VOD from your channel history"
+                  title: "Choose an authorized recording or VOD",
+                  description: "Select a recording or VOD you have permission to process"
                 },
                 {
                   step: "02", 
-                  title: "AI analyzes chat",
-                  description: "Our models scan every message to find peak excitement moments"
+                  title: "Analyze activity signals",
+                  description: "The current analyzer scores chat activity and suggests moments for review"
                 },
                 {
                   step: "03",
@@ -295,8 +295,8 @@ export default function HomePage() {
                   Ready to go viral?
                 </h2>
                 <p className="text-xl mb-8 text-gray-200 max-w-2xl mx-auto">
-                  Join thousands of streamers already using AI to create engaging content. 
-                  Start with 5 free clips today.
+                  Build and review short-form clips from content you are authorized to use. 
+                  Explore the current development build.
                 </p>
                 <div className="flex flex-col sm:flex-row gap-4 justify-center">
                   <SignedOut>

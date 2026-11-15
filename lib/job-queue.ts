@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto'
 import { ProcessingJob, ProcessingJobStatus, ClipStatus } from '@prisma/client'
 import type { Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
@@ -22,6 +23,7 @@ export class JobQueue {
   private processors: Map<string, JobProcessor> = new Map()
   private isProcessing = false
   private processInterval: NodeJS.Timeout | null = null
+  private readonly workerId = randomUUID()
 
   constructor() {
     // Register job processors
@@ -85,82 +87,105 @@ export class JobQueue {
   }
 
   private async processNextJob() {
+    // This lock prevents overlapping work in this process. The conditional
+    // updateMany below is the cross-process claim: only one worker can win.
     if (this.isProcessing) return
-
     this.isProcessing = true
+
+    const maxAttempts = Math.max(1, config.jobs.maxAttempts || 3)
+    let claimedJob: ProcessingJob | null = null
+
     try {
-      // Get next pending job
-      const maxAttempts = config.jobs.maxAttempts || 3
-      const job = await db.processingJob.findFirst({
+      // Check a small ordered batch so a job in backoff does not block later jobs.
+      const candidates = await db.processingJob.findMany({
         where: {
           status: ProcessingJobStatus.PENDING,
-          attempts: { lt: maxAttempts }
+          attempts: { lt: maxAttempts },
         },
-        orderBy: [
-          { priority: 'desc' },
-          { createdAt: 'asc' }
-        ]
+        orderBy: [{ priority: 'desc' }, { createdAt: 'asc' }],
+        take: 20,
       })
 
-      if (!job) {
-        this.isProcessing = false
-        return
-      }
+      const now = Date.now()
+      for (const candidate of candidates) {
+        if (candidate.attempts > 0) {
+          const baseDelayMs = 5000
+          const backoffMs = baseDelayMs * Math.pow(2, candidate.attempts - 1)
+          const jitterMs = Math.floor(Math.random() * (baseDelayMs / 2))
+          if (candidate.updatedAt.getTime() + backoffMs + jitterMs > now) continue
+        }
 
-      // Backoff before processing (exponential with jitter, no schema changes)
-      if (job.attempts > 0) {
-        const base = 5000 // 5s base
-        const backoff = base * Math.pow(2, job.attempts - 1)
-        const jitter = Math.floor(Math.random() * (base / 2))
-        const nextAllowed = new Date(job.updatedAt.getTime() + backoff + jitter)
-        const now = new Date()
-        if (nextAllowed > now) {
-          // Skip this cycle; let interval pick it up later
-          this.isProcessing = false
-          return
+        const claim = await db.processingJob.updateMany({
+          where: {
+            id: candidate.id,
+            status: ProcessingJobStatus.PENDING,
+            attempts: candidate.attempts,
+          },
+          data: {
+            status: ProcessingJobStatus.PROCESSING,
+            workerId: this.workerId,
+            startedAt: new Date(),
+            attempts: { increment: 1 },
+            error: null,
+          },
+        })
+
+        if (claim.count === 1) {
+          claimedJob = await db.processingJob.findUnique({ where: { id: candidate.id } })
+          if (claimedJob) break
         }
       }
 
-      // Update job status
-      await db.processingJob.update({
-        where: { id: job.id },
-        data: {
-          status: ProcessingJobStatus.PROCESSING,
-          startedAt: new Date(),
-          attempts: job.attempts + 1
-        }
-      })
+      if (!claimedJob) return
 
-      // Process the job
-      const processor = this.processors.get(job.type)
+      const processor = this.processors.get(claimedJob.type)
       if (!processor) {
-        throw new Error(`No processor registered for job type: ${job.type}`)
+        throw new Error(`No processor registered for job type: ${claimedJob.type}`)
       }
 
-      const result = await processor.process(job)
+      const result = await processor.process(claimedJob)
+      const finishedAt = new Date()
 
-      // Update job with result
       if (result.success) {
-        await db.processingJob.update({
-          where: { id: job.id },
+        await db.processingJob.updateMany({
+          where: { id: claimedJob.id, status: ProcessingJobStatus.PROCESSING, workerId: this.workerId },
           data: {
             status: ProcessingJobStatus.COMPLETED,
-            completedAt: new Date(),
-            result: result.data as Prisma.InputJsonValue
-          }
+            completedAt: finishedAt,
+            progress: 100,
+            result: (result.data ?? {}) as Prisma.InputJsonValue,
+            workerId: null,
+            error: null,
+          },
         })
       } else {
-        const isFinalAttempt = job.attempts >= 3
-        await db.processingJob.update({
-          where: { id: job.id },
+        const finalAttempt = claimedJob.attempts >= maxAttempts
+        await db.processingJob.updateMany({
+          where: { id: claimedJob.id, status: ProcessingJobStatus.PROCESSING, workerId: this.workerId },
           data: {
-            status: isFinalAttempt ? ProcessingJobStatus.FAILED : ProcessingJobStatus.PENDING,
-            error: result.error
-          }
+            status: finalAttempt ? ProcessingJobStatus.FAILED : ProcessingJobStatus.PENDING,
+            error: result.error || 'Job processor returned an unsuccessful result',
+            workerId: null,
+          },
         })
       }
     } catch (error) {
       console.error('Job processing error:', error)
+      if (claimedJob) {
+        try {
+          const finalAttempt = claimedJob.attempts >= maxAttempts
+          await db.processingJob.updateMany({
+            where: { id: claimedJob.id, status: ProcessingJobStatus.PROCESSING, workerId: this.workerId },
+            data: {
+              status: finalAttempt ? ProcessingJobStatus.FAILED : ProcessingJobStatus.PENDING,
+              error: error instanceof Error ? error.message : 'Unknown job processing error',
+              workerId: null,
+            },
+          })
+        } catch (updateError) {
+          console.error('Failed to persist job failure state:', updateError)
+        }
+      }
     } finally {
       this.isProcessing = false
     }
