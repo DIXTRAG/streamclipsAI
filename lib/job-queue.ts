@@ -88,10 +88,11 @@ export class JobQueue {
     if (this.isProcessing) return
 
     this.isProcessing = true
+    let job: ProcessingJob | null = null
+    const maxAttempts = Math.max(1, config.jobs.maxAttempts || 3)
+
     try {
-      // Get next pending job
-      const maxAttempts = config.jobs.maxAttempts || 3
-      const job = await db.processingJob.findFirst({
+      job = await db.processingJob.findFirst({
         where: {
           status: ProcessingJobStatus.PENDING,
           attempts: { lt: maxAttempts }
@@ -102,67 +103,92 @@ export class JobQueue {
         ]
       })
 
-      if (!job) {
-        this.isProcessing = false
-        return
-      }
+      if (!job) return
 
-      // Backoff before processing (exponential with jitter, no schema changes)
+      // Exponential backoff with jitter for retried jobs.
       if (job.attempts > 0) {
-        const base = 5000 // 5s base
+        const base = 5000
         const backoff = base * Math.pow(2, job.attempts - 1)
         const jitter = Math.floor(Math.random() * (base / 2))
         const nextAllowed = new Date(job.updatedAt.getTime() + backoff + jitter)
-        const now = new Date()
-        if (nextAllowed > now) {
-          // Skip this cycle; let interval pick it up later
-          this.isProcessing = false
-          return
-        }
+        if (nextAllowed > new Date()) return
       }
 
-      // Update job status
+      const attemptNumber = job.attempts + 1
       await db.processingJob.update({
         where: { id: job.id },
         data: {
           status: ProcessingJobStatus.PROCESSING,
           startedAt: new Date(),
-          attempts: job.attempts + 1
+          attempts: attemptNumber,
+          error: null
         }
       })
 
-      // Process the job
       const processor = this.processors.get(job.type)
       if (!processor) {
         throw new Error(`No processor registered for job type: ${job.type}`)
       }
 
       const result = await processor.process(job)
-
-      // Update job with result
       if (result.success) {
         await db.processingJob.update({
           where: { id: job.id },
           data: {
             status: ProcessingJobStatus.COMPLETED,
             completedAt: new Date(),
+            error: null,
             result: result.data as Prisma.InputJsonValue
           }
         })
       } else {
-        const isFinalAttempt = job.attempts >= 3
+        const terminal = attemptNumber >= maxAttempts
         await db.processingJob.update({
           where: { id: job.id },
           data: {
-            status: isFinalAttempt ? ProcessingJobStatus.FAILED : ProcessingJobStatus.PENDING,
-            error: result.error
+            status: terminal ? ProcessingJobStatus.FAILED : ProcessingJobStatus.PENDING,
+            error: result.error || 'Job processing failed'
           }
         })
+        if (terminal) await this.markRelatedClipFailed(job)
       }
     } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unexpected job processing error'
       console.error('Job processing error:', error)
+
+      if (job) {
+        const attempts = job.attempts + 1
+        const terminal = attempts >= maxAttempts
+        try {
+          await db.processingJob.update({
+            where: { id: job.id },
+            data: {
+              status: terminal ? ProcessingJobStatus.FAILED : ProcessingJobStatus.PENDING,
+              error: message,
+              attempts
+            }
+          })
+          if (terminal) await this.markRelatedClipFailed(job)
+        } catch (updateError) {
+          console.error('Failed to persist job failure:', updateError)
+        }
+      }
     } finally {
       this.isProcessing = false
+    }
+  }
+
+  private async markRelatedClipFailed(job: ProcessingJob) {
+    const parameters = job.parameters as { clipId?: string }
+    if (!parameters.clipId) return
+
+    try {
+      await db.clip.updateMany({
+        where: { id: parameters.clipId, userId: job.userId },
+        data: { status: ClipStatus.FAILED }
+      })
+    } catch (error) {
+      console.error('Failed to mark clip as failed:', error)
     }
   }
 
@@ -450,7 +476,7 @@ class UploadClipProcessor implements JobProcessor {
       })
 
       if (!uploadResult.success) {
-        return { success: false, error: uploadResult.error }
+        return { success: false, error: uploadResult.error || 'Clip upload failed' }
       }
 
       // Generate thumbnail
