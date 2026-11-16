@@ -88,10 +88,11 @@ export class JobQueue {
     if (this.isProcessing) return
 
     this.isProcessing = true
+    let job: ProcessingJob | null = null
+    const maxAttempts = Math.max(1, config.jobs.maxAttempts || 3)
+
     try {
-      // Get next pending job
-      const maxAttempts = config.jobs.maxAttempts || 3
-      const job = await db.processingJob.findFirst({
+      job = await db.processingJob.findFirst({
         where: {
           status: ProcessingJobStatus.PENDING,
           attempts: { lt: maxAttempts }
@@ -102,67 +103,92 @@ export class JobQueue {
         ]
       })
 
-      if (!job) {
-        this.isProcessing = false
-        return
-      }
+      if (!job) return
 
-      // Backoff before processing (exponential with jitter, no schema changes)
+      // Exponential backoff with jitter for retried jobs.
       if (job.attempts > 0) {
-        const base = 5000 // 5s base
+        const base = 5000
         const backoff = base * Math.pow(2, job.attempts - 1)
         const jitter = Math.floor(Math.random() * (base / 2))
         const nextAllowed = new Date(job.updatedAt.getTime() + backoff + jitter)
-        const now = new Date()
-        if (nextAllowed > now) {
-          // Skip this cycle; let interval pick it up later
-          this.isProcessing = false
-          return
-        }
+        if (nextAllowed > new Date()) return
       }
 
-      // Update job status
+      const attemptNumber = job.attempts + 1
       await db.processingJob.update({
         where: { id: job.id },
         data: {
           status: ProcessingJobStatus.PROCESSING,
           startedAt: new Date(),
-          attempts: job.attempts + 1
+          attempts: attemptNumber,
+          error: null
         }
       })
 
-      // Process the job
       const processor = this.processors.get(job.type)
       if (!processor) {
         throw new Error(`No processor registered for job type: ${job.type}`)
       }
 
       const result = await processor.process(job)
-
-      // Update job with result
       if (result.success) {
         await db.processingJob.update({
           where: { id: job.id },
           data: {
             status: ProcessingJobStatus.COMPLETED,
             completedAt: new Date(),
+            error: null,
             result: result.data as Prisma.InputJsonValue
           }
         })
       } else {
-        const isFinalAttempt = job.attempts >= 3
+        const terminal = attemptNumber >= maxAttempts
         await db.processingJob.update({
           where: { id: job.id },
           data: {
-            status: isFinalAttempt ? ProcessingJobStatus.FAILED : ProcessingJobStatus.PENDING,
-            error: result.error
+            status: terminal ? ProcessingJobStatus.FAILED : ProcessingJobStatus.PENDING,
+            error: result.error || 'Job processing failed'
           }
         })
+        if (terminal) await this.markRelatedClipFailed(job)
       }
     } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unexpected job processing error'
       console.error('Job processing error:', error)
+
+      if (job) {
+        const attempts = job.attempts + 1
+        const terminal = attempts >= maxAttempts
+        try {
+          await db.processingJob.update({
+            where: { id: job.id },
+            data: {
+              status: terminal ? ProcessingJobStatus.FAILED : ProcessingJobStatus.PENDING,
+              error: message,
+              attempts
+            }
+          })
+          if (terminal) await this.markRelatedClipFailed(job)
+        } catch (updateError) {
+          console.error('Failed to persist job failure:', updateError)
+        }
+      }
     } finally {
       this.isProcessing = false
+    }
+  }
+
+  private async markRelatedClipFailed(job: ProcessingJob) {
+    const parameters = job.parameters as { clipId?: string }
+    if (!parameters.clipId) return
+
+    try {
+      await db.clip.updateMany({
+        where: { id: parameters.clipId, userId: job.userId },
+        data: { status: ClipStatus.FAILED }
+      })
+    } catch (error) {
+      console.error('Failed to mark clip as failed:', error)
     }
   }
 
@@ -216,16 +242,23 @@ class AnalyzeVODProcessor implements JobProcessor {
         clientSecret: process.env.TWITCH_CLIENT_SECRET!
       })
 
-      // Fetch chat data
-      const chatMessages = await twitchClient.getChatReplay(vod.twitchVodId)
-      
-      if (chatMessages.length === 0) {
-        return { success: false, error: 'No chat data found for VOD' }
+      // Use only a direct media URL supplied by the user. The processor
+      // validates its HTTPS host against VIDEO_SOURCE_ALLOWED_HOSTS.
+      const vodMediaUrl = vod.vodUrl
+      if (!vodMediaUrl) {
+        return {
+          success: false,
+          error: 'No authorized video source configured. Add a direct HTTPS media URL to this VOD and allow its host in VIDEO_SOURCE_ALLOWED_HOSTS.'
+        }
       }
 
-      // Analyze chat for highlights
+      // Historical VOD chat replay is not exposed by Twitch Helix.
+      // Chat is optional and must never block video processing.
+      const chatMessages = await twitchClient.getChatReplay(vod.twitchVodId)
       const analyzer = new ChatAnalyzer()
-      const highlights = analyzer.analyzeChatSpikes(chatMessages)
+      const highlights = chatMessages.length > 0
+        ? analyzer.analyzeChatSpikes(chatMessages)
+        : []
 
       // Create clip records for each highlight
       const clips = await Promise.all(
@@ -280,14 +313,9 @@ class AnalyzeVODProcessor implements JobProcessor {
         })
       }
 
-      // Get the actual VOD download URL
-      const vodDownloadUrl = await twitchClient.getVODDownloadUrl(vod.twitchVodId);
-      
-      if (!vodDownloadUrl) {
-        throw new Error('Failed to get VOD download URL');
-      }
-
-      // Create extraction jobs for each clip
+      // Create extraction jobs from the authorized media source.
+      // If there are no chat highlights, finish cleanly with zero clips rather
+      // than inventing timestamps. Audio/video highlight detection is separate work.
       for (const clip of clips) {
         await db.processingJob.create({
           data: {
@@ -297,7 +325,7 @@ class AnalyzeVODProcessor implements JobProcessor {
             status: ProcessingJobStatus.PENDING,
             parameters: {
               clipId: clip.id,
-              vodUrl: vodDownloadUrl,
+              vodUrl: vodMediaUrl,
               startTime: clip.startTime,
               endTime: clip.endTime
             }
@@ -450,7 +478,7 @@ class UploadClipProcessor implements JobProcessor {
       })
 
       if (!uploadResult.success) {
-        return { success: false, error: uploadResult.error }
+        return { success: false, error: uploadResult.error || 'Clip upload failed' }
       }
 
       // Generate thumbnail

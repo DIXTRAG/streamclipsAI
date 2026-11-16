@@ -139,105 +139,18 @@ export class TwitchAPIClient {
     return vods && vods.length > 0 ? vods[0] : null;
   }
 
-  async getChatReplay(vodId: string): Promise<Array<{
+  /**
+   * Twitch Helix does not expose historical VOD chat replay.
+   * Do not call third-party replay services or the retired v5 API.
+   * Chat is optional; live chat should be collected prospectively via EventSub.
+   */
+  async getChatReplay(_vodId: string): Promise<Array<{
     timestamp: number;
     username: string;
     message: string;
     emotes?: string[];
   }>> {
-    // Using a third-party service for chat replay (TwitchRecover API)
-    // Note: In production, you might want to use your own chat recording system
-    try {
-      const vod = await this.getVODById(vodId);
-      if (!vod) {
-        throw new Error('VOD not found');
-      }
-
-      // Get chat logs from TwitchRecover API (unofficial but reliable)
-      const chatUrl = `https://api.twitchrecover.com/vodchat/${vodId}`;
-      const response = await fetch(chatUrl);
-      
-      if (!response.ok) {
-        // Fallback to v5 API (deprecated but still works)
-        return this.getChatReplayV5(vodId);
-      }
-
-      const chatData = await response.json();
-      
-      // Transform to our format
-      return chatData.comments.map((comment: any) => ({
-        timestamp: comment.content_offset_seconds * 1000,
-        username: comment.commenter.display_name || comment.commenter.name,
-        message: comment.message.body,
-        emotes: this.extractEmotes(comment.message.fragments || [])
-      }));
-    } catch (error) {
-      console.error('Failed to fetch chat replay:', error);
-      // Return empty array instead of mock data in production
-      return [];
-    }
-  }
-
-  private async getChatReplayV5(vodId: string): Promise<Array<{
-    timestamp: number;
-    username: string;
-    message: string;
-    emotes?: string[];
-  }>> {
-    try {
-      // Twitch v5 API endpoint (deprecated but functional)
-      const response = await fetch(
-        `https://api.twitch.tv/v5/videos/${vodId}/comments?content_offset_seconds=0`,
-        {
-          headers: {
-            'Client-ID': this.clientId,
-            'Accept': 'application/vnd.twitchtv.v5+json'
-          }
-        }
-      );
-
-      if (!response.ok) {
-        return [];
-      }
-
-      const data = await response.json();
-      const messages: any[] = [];
-      
-      // Process paginated results
-      let cursor = data._next;
-      messages.push(...data.comments);
-      
-      // Fetch additional pages (limit to prevent too many requests)
-      let pageCount = 0;
-      while (cursor && pageCount < 100) {
-        const nextResponse = await fetch(
-          `https://api.twitch.tv/v5/videos/${vodId}/comments?cursor=${cursor}`,
-          {
-            headers: {
-              'Client-ID': this.clientId,
-              'Accept': 'application/vnd.twitchtv.v5+json'
-            }
-          }
-        );
-        
-        if (!nextResponse.ok) break;
-        
-        const nextData = await nextResponse.json();
-        messages.push(...nextData.comments);
-        cursor = nextData._next;
-        pageCount++;
-      }
-      
-      return messages.map((comment: any) => ({
-        timestamp: comment.content_offset_seconds * 1000,
-        username: comment.commenter.display_name || comment.commenter.name,
-        message: comment.message.body,
-        emotes: this.extractEmotes(comment.message.fragments || [])
-      }));
-    } catch (error) {
-      console.error('V5 API failed:', error);
-      return [];
-    }
+    return [];
   }
 
   private extractEmotes(fragments: Array<{text: string; emoticon?: {emoticon_id: string}}>): string[] {
@@ -320,66 +233,4 @@ export class TwitchAPIClient {
     return this.fetchTwitchAPI<TwitchClip[]>(endpoint);
   }
 
-  async getVODDownloadUrl(vodId: string): Promise<string | null> {
-    try {
-      const vod = await this.getVODById(vodId);
-      if (!vod) return null;
-      
-      // Get access token for VOD playback
-      const tokenResponse = await fetch(
-        `https://gql.twitch.tv/gql`,
-        {
-          method: 'POST',
-          headers: {
-            'Client-ID': this.clientId,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            operationName: 'PlaybackAccessToken',
-            variables: {
-              isLive: false,
-              login: '',
-              isVod: true,
-              vodID: vodId,
-              playerType: 'site'
-            },
-            extensions: {
-              persistedQuery: {
-                version: 1,
-                sha256Hash: '0828119ded1c13477966434e15800ff57ddacf13ba1911c129dc2200705b0712'
-              }
-            }
-          })
-        }
-      );
-
-      if (!tokenResponse.ok) {
-        console.error('Failed to get playback token');
-        return null;
-      }
-
-      const tokenData = await tokenResponse.json();
-      const accessToken = tokenData.data?.videoPlaybackAccessToken;
-
-      if (!accessToken) {
-        console.error('No access token in response');
-        return null;
-      }
-
-      // Build M3U8 URL with authentication
-      const params = new URLSearchParams({
-        nauthsig: accessToken.signature,
-        nauth: accessToken.value,
-        allow_source: 'true',
-        fast_bread: 'true',
-        player_backend: 'mediaplayer',
-        transcode_mode: 'cbr_v1'
-      });
-
-      return `https://usher.ttvnw.net/vod/${vodId}.m3u8?${params.toString()}`;
-    } catch (error) {
-      console.error('Error getting VOD download URL:', error);
-      return null;
-    }
-  }
 }
