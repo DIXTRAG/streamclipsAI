@@ -20,8 +20,8 @@ describe('buildAudioHighlightsFromRms', () => {
   })
 
   it('does not produce clips shorter than the minimum duration', () => {
-    const rms = Array(20).fill(0.01)
-    rms[10] = 0.2
-    expect(buildAudioHighlightsFromRms(rms, 20)).toEqual([])
+    const rms = Array(10).fill(0.01)
+    rms[5] = 0.2
+    expect(buildAudioHighlightsFromRms(rms, 10)).toEqual([])
   })
 })
