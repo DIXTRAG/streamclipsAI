@@ -41,3 +41,10 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 VOD processing uses the direct HTTPS media URL saved in the VOD's `vodUrl` field. It does not download Twitch VODs through private playback GraphQL endpoints. Configure `VIDEO_SOURCE_ALLOWED_HOSTS` as a comma-separated list of exact hostnames that serve media files you are authorized to process (for example, your own object-storage or CDN hostname). The source URL host must match one of these entries exactly. Do not add Twitch watch-page hosts or arbitrary domains. A normal Twitch VOD page URL is not a direct media URL.
 
 Historical Twitch VOD chat replay is not retrieved from third-party services or the retired v5 API. When no chat messages are available, analysis completes with zero automatically detected highlights; it does not invent timestamps. Prospective live chat collection can be implemented separately through Twitch EventSub.
+
+
+## Automatic audio highlight detection (initial MVP)
+
+When historical chat is unavailable, the analysis worker scans the authorized VOD audio with FFmpeg and looks for unusually loud one-second windows. It groups nearby peaks into candidate moments and queues up to eight non-overlapping clips. This is a lightweight audio-energy heuristic: it can surface shouting, cheering, or other loud moments, but it does not understand speech or game context and may miss quiet highlights. It does not yet perform transcription, semantic AI analysis, or visual-scene detection.
+
+The worker needs FFmpeg installed and the direct media host listed in `VIDEO_SOURCE_ALLOWED_HOSTS`. The detector streams mono 8 kHz PCM through FFmpeg and processes it incrementally, avoiding loading the full VOD into memory. Chat-derived moments take precedence when chat data is available; audio detection is the fallback.
