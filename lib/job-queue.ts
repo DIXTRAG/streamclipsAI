@@ -2,6 +2,7 @@ import { ProcessingJob, ProcessingJobStatus, ClipStatus } from '@prisma/client'
 import type { Prisma } from '@prisma/client'
 import { db } from '@/lib/db'
 import { ChatAnalyzer } from '@/lib/chat-analyzer'
+import { detectAudioHighlights } from '@/lib/audio-highlight-detector'
 import { TwitchAPIClient } from '@/lib/twitch-api'
 import { VideoProcessor } from '@/lib/video-processor'
 import { StorageManager } from '@/lib/storage'
@@ -255,34 +256,64 @@ class AnalyzeVODProcessor implements JobProcessor {
       // Historical VOD chat replay is not exposed by Twitch Helix.
       // Chat is optional and must never block video processing.
       const chatMessages = await twitchClient.getChatReplay(vod.twitchVodId)
-      const analyzer = new ChatAnalyzer()
-      const highlights = chatMessages.length > 0
-        ? analyzer.analyzeChatSpikes(chatMessages)
+      const chatHighlights = chatMessages.length > 0
+        ? new ChatAnalyzer().analyzeChatSpikes(chatMessages)
         : []
 
-      // Create clip records for each highlight
+      // If historical chat is unavailable, scan the authorized VOD audio.
+      // This is a lightweight loudness heuristic, not semantic AI understanding.
+      const audioHighlights = chatHighlights.length === 0
+        ? await detectAudioHighlights({
+            inputUrl: vodMediaUrl,
+            durationSeconds: vod.duration
+          })
+        : []
+
+      const highlightCandidates = chatHighlights.length > 0
+        ? chatHighlights.map((highlight) => ({
+            startTime: Math.floor(highlight.timestamp / 1000),
+            endTime: Math.floor(highlight.endTimestamp / 1000),
+            confidenceScore: highlight.confidenceScore,
+            reason: highlight.reason,
+            source: 'chat',
+            metadata: {
+              messageCount: highlight.messageCount,
+              uniqueUsers: highlight.uniqueUsers,
+              topEmotes: highlight.topEmotes,
+              keywords: highlight.keywords,
+              activityPattern: highlight.activityPattern,
+              peakActivity: highlight.peakActivity
+            }
+          }))
+        : audioHighlights.map((highlight) => ({
+            startTime: highlight.startTime,
+            endTime: highlight.endTime,
+            confidenceScore: highlight.confidenceScore,
+            reason: highlight.reason,
+            source: 'audio_energy',
+            metadata: {
+              peakRms: highlight.peakRms,
+              baselineRms: highlight.baselineRms
+            }
+          }))
+
+      // Create clip records for each detected moment.
       const clips = await Promise.all(
-        highlights.map(async (highlight, index) => {
-          const startSec = Math.floor(highlight.timestamp / 1000)
-          const endSec = Math.floor(highlight.endTimestamp / 1000)
-          const duration = Math.max(1, endSec - startSec)
+        highlightCandidates.map(async (highlight, index) => {
+          const duration = Math.max(1, highlight.endTime - highlight.startTime)
           return await db.clip.create({
             data: {
               vodId: vod.id,
               userId: vod.userId,
               title: `Highlight ${index + 1}: ${highlight.reason}`,
-              startTime: startSec,
-              endTime: endSec,
+              startTime: highlight.startTime,
+              endTime: highlight.endTime,
               duration,
               confidenceScore: highlight.confidenceScore,
               status: ClipStatus.PENDING,
               metadata: {
-                messageCount: highlight.messageCount,
-                uniqueUsers: highlight.uniqueUsers,
-                topEmotes: highlight.topEmotes,
-                keywords: highlight.keywords,
-                activityPattern: highlight.activityPattern,
-                peakActivity: highlight.peakActivity
+                source: highlight.source,
+                ...highlight.metadata
               }
             }
           })
