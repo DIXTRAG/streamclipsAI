@@ -58,10 +58,23 @@ export class VideoProcessor {
     const outputPath = path.join(this.tempDir, `clip_${uuidv4()}.${outputFormat}`)
 
     try {
-      // For Twitch VODs, we need to handle authentication
-      const isM3U8 = inputUrl.includes('.m3u8')
-      const headers = isM3U8 && process.env.TWITCH_CLIENT_ID ? 
-        ['-headers', `Client-ID: ${process.env.TWITCH_CLIENT_ID}\r\n`] : []
+      // Only accept explicitly allow-listed HTTPS media hosts. This keeps
+      // FFmpeg from fetching arbitrary URLs or internal network targets.
+      const source = new URL(inputUrl)
+      const allowedHosts = (process.env.VIDEO_SOURCE_ALLOWED_HOSTS || '')
+        .split(',')
+        .map((host) => host.trim().toLowerCase())
+        .filter(Boolean)
+      if (source.protocol !== 'https:' || source.username || source.password) {
+        throw new Error('Video source must be an HTTPS URL without embedded credentials')
+      }
+      if (allowedHosts.length === 0 || !allowedHosts.includes(source.hostname.toLowerCase())) {
+        throw new Error('Video source host is not allow-listed. Configure VIDEO_SOURCE_ALLOWED_HOSTS with the exact media host.')
+      }
+
+      // The media source is authorized through the explicit host allow-list;
+      // no private Twitch playback token or Client-ID header is used.
+      const headers: string[] = []
 
       // Build FFmpeg command
       const args = [
