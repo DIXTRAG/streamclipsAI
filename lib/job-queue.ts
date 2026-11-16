@@ -242,16 +242,23 @@ class AnalyzeVODProcessor implements JobProcessor {
         clientSecret: process.env.TWITCH_CLIENT_SECRET!
       })
 
-      // Fetch chat data
-      const chatMessages = await twitchClient.getChatReplay(vod.twitchVodId)
-      
-      if (chatMessages.length === 0) {
-        return { success: false, error: 'No chat data found for VOD' }
+      // Use only a direct media URL supplied by the user. The processor
+      // validates its HTTPS host against VIDEO_SOURCE_ALLOWED_HOSTS.
+      const vodMediaUrl = vod.vodUrl
+      if (!vodMediaUrl) {
+        return {
+          success: false,
+          error: 'No authorized video source configured. Add a direct HTTPS media URL to this VOD and allow its host in VIDEO_SOURCE_ALLOWED_HOSTS.'
+        }
       }
 
-      // Analyze chat for highlights
+      // Historical VOD chat replay is not exposed by Twitch Helix.
+      // Chat is optional and must never block video processing.
+      const chatMessages = await twitchClient.getChatReplay(vod.twitchVodId)
       const analyzer = new ChatAnalyzer()
-      const highlights = analyzer.analyzeChatSpikes(chatMessages)
+      const highlights = chatMessages.length > 0
+        ? analyzer.analyzeChatSpikes(chatMessages)
+        : []
 
       // Create clip records for each highlight
       const clips = await Promise.all(
@@ -306,14 +313,9 @@ class AnalyzeVODProcessor implements JobProcessor {
         })
       }
 
-      // Get the actual VOD download URL
-      const vodDownloadUrl = await twitchClient.getVODDownloadUrl(vod.twitchVodId);
-      
-      if (!vodDownloadUrl) {
-        throw new Error('Failed to get VOD download URL');
-      }
-
-      // Create extraction jobs for each clip
+      // Create extraction jobs from the authorized media source.
+      // If there are no chat highlights, finish cleanly with zero clips rather
+      // than inventing timestamps. Audio/video highlight detection is separate work.
       for (const clip of clips) {
         await db.processingJob.create({
           data: {
@@ -323,7 +325,7 @@ class AnalyzeVODProcessor implements JobProcessor {
             status: ProcessingJobStatus.PENDING,
             parameters: {
               clipId: clip.id,
-              vodUrl: vodDownloadUrl,
+              vodUrl: vodMediaUrl,
               startTime: clip.startTime,
               endTime: clip.endTime
             }
